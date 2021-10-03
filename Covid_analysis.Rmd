@@ -1,0 +1,387 @@
+---
+title: "Covid Data Analysis"
+author: "Karan Juneja"
+date: "19/09/2021"
+output: pdf_document
+---
+
+We need to analyse the covid data collected by john's hopkins university, and produce some insights on the data.
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(lubridate)
+library(tidyquant)
+library(cowplot)
+```
+
+# Loading Files
+
+Source is the https://github.com/CSSEGISandData/COVID-19,
+Which is COVID-19 Data Repository by the Center for Systems Science and 
+Engineering (CSSE) at Johns Hopkins University.
+License : Creative Commons Attribution 4.0 International (CC BY 4.0) by the Johns Hopkins University.
+
+```{r file loading}
+
+url_in <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_"
+file_names <- c("confirmed_global.csv",
+                    "deaths_global.csv",
+                    "confirmed_US.csv",
+                    "deaths_US.csv")
+urls <- str_c(url_in,file_names)
+```
+
+# Reading files
+
+Reading the files using **read_csv**, since files are comma separated. 
+
+```{r reading}
+global_cases <- read_csv(urls[1], show_col_types = FALSE)
+global_deaths <- read_csv(urls[2], show_col_types = FALSE) 
+US_cases <- read_csv(urls[3], show_col_types = FALSE)
+US_deaths <- read_csv(urls[4], show_col_types = FALSE)
+```
+
+# Preprocessing 
+
+Here we preprocess the data, clean it up converting dates to date formats using lubridate. We also convert the data
+to a format that we can use to analyze.
+
+```{r Preprocessing}
+
+
+global_cases <- global_cases %>%
+    pivot_longer(cols = -c(`Province/State`, 
+                           `Country/Region`, Lat, Long), 
+                 names_to = "date", 
+               values_to = "cases") %>%
+  select(-c(Lat,Long))
+
+global_deaths <- global_deaths %>%
+    pivot_longer(cols = -c(`Province/State`,
+                           `Country/Region`, Lat, Long), 
+                 names_to = "date", 
+               values_to = "deaths") %>%
+  select(-c(Lat, Long))
+
+
+global <- global_cases %>% 
+  full_join(global_deaths) %>%
+  rename(Country_Region = `Country/Region`, 
+         Province_State = `Province/State`) %>%
+  mutate(date = mdy(date))
+
+```
+
+
+Summary of the data
+
+```{r}
+summary(global)
+```
+
+Removing all the rows on where there was no covid case.
+
+```{r}
+global <- global %>% filter(cases > 0)
+```
+
+
+Creating a key to join population data of a country with global dataframe.
+
+```{r}
+
+global <- global %>% 
+  unite("Combined_Key", 
+                 c(Province_State, Country_Region), 
+                                   sep = ", ", 
+                 na.rm = TRUE, 
+                 remove = FALSE)
+```
+
+Loading the population data from the github repository.
+
+```{r}
+
+uid_lookup_url <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/UID_ISO_FIPS_LookUp_Table.csv"
+uid <- read_csv(uid_lookup_url) %>%
+  select(-c(Lat, Long_, Combined_Key, code3, iso2, iso3, Admin2))
+
+```
+
+Joining both the data frames using left join on "Province_State" and "Country_Region".
+
+```{r}
+
+global <- global %>% 
+  left_join(uid, by = c("Province_State", "Country_Region")) %>%
+  select(-c(UID, FIPS)) %>%
+  select(Province_State, Country_Region, date,
+         cases, deaths, Population,
+         Combined_Key)
+global
+```
+
+# Preprocessing United States Data
+
+Here we preprocess the data, clean it up converting dates to date formats using lubridate. We also convert the data
+to a format that we can use to analyze US data, Also Combining the Deaths data with Cases data and creating a new
+dataframe called "US".
+
+```{r}
+US_cases <- US_cases %>%
+    pivot_longer(cols = -(UID:Combined_Key), 
+                 names_to = "date", 
+                 values_to = "cases") %>%
+    select(Admin2:cases) %>%
+    mutate(date = mdy(date)) %>%
+  select(-c(Lat, Long_))
+ 
+US_deaths <- US_deaths %>%
+    pivot_longer(cols = -(UID:Population), 
+                 names_to = "date", 
+                 values_to ="deaths") %>%
+    select(Admin2:deaths) %>%
+    mutate(date = mdy(date)) %>%
+ select(-c(Lat, Long_))
+US <- US_cases %>% 
+  full_join(US_deaths)
+```
+
+
+```{r}
+US_by_state <- US %>%
+  group_by(Province_State, Country_Region, date) %>%
+  summarize(cases = sum(cases), deaths = sum(deaths), 
+            Population = sum(Population)) %>%
+  mutate(deaths_per_mill = deaths *1000000 / Population) %>%
+  select(Province_State, Country_Region, date,
+         cases, deaths, deaths_per_mill, Population) %>%
+  ungroup()
+
+US_totals <- US_by_state %>%
+  group_by(Country_Region, date) %>%
+   summarize(cases = sum(cases), deaths = sum(deaths), 
+            Population = sum(Population)) %>%
+  mutate(deaths_per_mill = deaths *1000000 / Population) %>%
+  select(Country_Region, date,
+         cases, deaths, deaths_per_mill, Population) %>%
+  ungroup()
+
+```
+
+## PLOTS
+
+The plot below shows deaths and cases in united states from patient zero to today.
+
+```{r}
+
+US_totals %>% 
+  filter(cases > 0) %>%
+  ggplot(aes(x = date, y = cases)) +
+    geom_line(aes(color = "cases")) +
+  geom_point(aes(color = "cases")) +
+  geom_line(aes(y = deaths, color = "deaths")) +
+  geom_point(aes(y = deaths, color = "deaths")) +
+    scale_y_log10() +
+    theme(legend.position="bottom",
+          axis.text.x = element_text(angle = 90)) +
+  labs(title = "COVID19 in US", y= NULL)
+
+```
+
+The plot below shows deaths and cases in New york from patient zero to today.
+
+```{r}
+state <- "New York"
+US_by_state %>% 
+  filter(Province_State == state) %>%
+  filter(cases > 0) %>%
+  ggplot(aes(x = date, y = cases)) +
+    geom_line(aes(color = "cases")) +
+  geom_point(aes(color = "cases")) +
+  geom_line(aes(y = deaths, color = "deaths")) +
+  geom_point(aes(y = deaths, color = "deaths")) +
+    scale_y_log10() +
+    theme(legend.position="bottom",
+          axis.text.x = element_text(angle = 90)) +
+  labs(title = str_c("COVID19 in ", state), y= NULL)
+```
+if we see the y axis in the graph above the values peak at 1e+05 which is a huge number and doesn't really tell us much,
+therefore using the lag() function we will create new columns **new_cases** and **new_deaths** i.e the number of cases
+per day and the number of deaths per day.
+
+```{r}
+US_by_state <- US_by_state %>%
+  mutate(new_cases = cases - lag(cases), 
+  new_deaths = deaths - lag(deaths))
+US_totals <- US_totals %>%
+  mutate(new_cases = cases - lag(cases), 
+  new_deaths = deaths - lag(deaths))
+```
+
+Now creating a new graph with the columns **new_cases** and **new_deaths**, we can observe the trends in more depth per day.
+
+```{r}
+US_totals %>%
+  ggplot(aes(x = date, y = new_cases)) +
+    geom_line(aes(color = "new_cases")) +
+  geom_point(aes(color = "new_cases")) +
+  geom_line(aes(y = new_deaths, color = "new_deaths")) +
+  geom_point(aes(y = new_deaths, color = "new_deaths")) +
+    scale_y_log10() +
+    theme(legend.position="bottom",
+          axis.text.x = element_text(angle = 90)) +
+  labs(title = "COVID19 in US", y= NULL)
+```
+Same graph as above but only for 1 state i.e new york, but still it doesn't show the full story.
+
+```{r}
+state <- "New York"
+US_by_state %>% 
+  filter(Province_State == state) %>%
+  ggplot(aes(x = date, y = new_cases)) +
+    geom_line(aes(color = "new_cases")) +
+  geom_point(aes(color = "new_cases")) +
+  geom_line(aes(y = new_deaths, color = "new_deaths")) +
+  geom_point(aes(y = new_deaths, color = "new_deaths")) +
+    scale_y_log10() +
+    theme(legend.position="bottom",
+          axis.text.x = element_text(angle = 90)) +
+  labs(title = str_c("COVID19 in ", state), y= NULL)
+```
+
+Below we are finding out the best and worst states in terms of deaths and cases per 1000.
+We use the **slice_min** to find the top 10 best states and **slice_max** to find the top 10
+worst states in terms of deaths and cases per 1000 people.
+
+```{r}
+US_state_totals <- US_by_state %>% 
+  group_by(Province_State) %>%
+  summarize(deaths = max(deaths), cases = max(cases),
+            population = max(Population), 
+            cases_per_thou = 1000* cases / population,
+            deaths_per_thou = 1000 * deaths / population) %>% 
+  filter(cases > 0, population > 0) 
+
+US_state_totals %>%
+  slice_min(deaths_per_thou, n = 10)
+```
+
+
+```{r}
+US_state_totals %>% 
+  slice_max(deaths_per_thou, n = 10)
+```
+So my interest in the data is how do we find when the covid cases in a country have
+peaked and also has the deaths been peaked?
+
+From the total cases and death plots above we really can't see the actual trends such 
+as the trends which might tell us when the cases are plateauing, details about the 
+what wave are we in?? and which part of the wave are we in etc. So we can use 
+**Moving averages** for these analysis.
+
+Below are the plots made using 7 day **simple moving average** and 30 day *SMA* using
+the tidyquant package.
+
+We can see from the graph that in the 2nd wave as soon as the 30 day sma plateaued
+after that the cases started falling. We can see the same trend happening in the third wave that's 
+ongoing right now, but i think we can confidently deduce that the cases are plateauing and we might
+see a huge drop in cases soon.
+
+Let's look at the deaths, so in the first wave deaths peaked at 2000 deaths a day, 2nd wave they peaked at 
+3000 deaths a day, but right now in the ongoing 3rd wave the deaths still haven't plateaued and that's a
+scary concern. But since the cases have started to plateau and also vaccine rollouts, the deaths might not reach
+the 2nd wave peak of 3000 deaths a day.
+
+```{r}
+cases <- US_totals %>%
+  ggplot(aes(x = date, y = new_cases)) +
+   geom_ma(ma_fun = SMA, n = 7,alpha = 0.5) +                
+  geom_ma(ma_fun = SMA, n = 30, color = "red")+
+  labs(title = "SMA Cases per day")
+deaths <- US_totals %>% 
+  ggplot(aes(x = date, y = new_deaths)) +
+  geom_ma(ma_fun = SMA, n = 7,alpha = 0.5) +                 
+  geom_ma(ma_fun = SMA, n = 30, color = "red")+
+  labs(title = "SMA deaths per day")
+
+plot_grid(cases,deaths,ncol=1,align='v')
+
+```
+
+The state of alabama shows almost the same pattern as the whole of US but, we can see that the 
+cases have started to drop and the 7 day sma kind of proves that as well as 30 day sma concludes 
+the findings.
+
+But the deaths still are rising in alabama too its a scary thing.
+
+```{r}
+state <- "Alabama"
+cases <- US_by_state %>% 
+  filter(Province_State == state) %>%
+  ggplot(aes(x = date, y = new_cases)) +
+  geom_ma(ma_fun = EMA, n = 7,alpha=0.5) +                      # Plot 30-day EMA
+  geom_ma(ma_fun = EMA, n = 30, color = "red")+
+  labs(title = "SMA Cases per day in alabama")
+
+deaths <- US_totals %>% 
+  ggplot(aes(x = date, y = new_deaths)) +
+  geom_ma(ma_fun = SMA, n = 7,alpha = 0.5) +                 
+  geom_ma(ma_fun = SMA, n = 30, color = "red")+
+  labs(title = "SMA deaths per day in alabama")
+
+plot_grid(cases,deaths,ncol=1,align='v')
+
+```
+
+## Model
+
+Lets create a linear model with target as *death_per_thou* and predictor as *cases_per_thou*, what
+we mean by creating the model is that given the *cases_per_thou* can we predict the  *death_per_thou*,
+using a linear regression model.
+
+```{r}
+mod <- lm(deaths_per_thou ~ cases_per_thou, data = US_state_totals)
+summary(mod)
+```
+
+```{r}
+x_grid <- seq(1, 151)
+new_df <- tibble(cases_per_thou = x_grid)
+US_state_totals %>% mutate(pred = predict(mod))
+```
+
+```{r}
+US_tot_w_pred <- US_state_totals %>% mutate(pred = predict(mod))
+US_tot_w_pred %>% ggplot() +
+geom_point(aes(x = cases_per_thou, y = deaths_per_thou), color = "blue") +
+geom_point(aes(x = cases_per_thou, y = pred), color = "red")
+```
+
+## Bias
+
++ Dataset Bias
+
+  + How the cases are counted?,if a person takes 3 tests and comes positive 3 times 
+  is that also counted as a single case or a multiple cases?
+  
++ Personal Bias
+  
+  + So my bias was that due to vaccinations,there would be less number of cases.But the
+  cases in the third wave seem to be peaking at the same level as the 2nd wave when there
+  were no vaccinations.
+
+
+
+## Conclusion
+
+Covid is not gone, even with the rigorous vaccine rollouts we can see that the number of cases per
+day in the 3rd wave seem to have peaked out at the same level as the number of cases per day during the
+2nd Wave.
+
+But deaths haven't peaked out, yes at the same time in the 2nd wave at the same number of cases there were
+more deaths then now (due to vaccinations?).But the deaths Moving average graph hasn't peaked yet so time will tell
+how many lives will be lost due to this pandemic.But looking at the countries such as the UK the third wave even if
+it had as many cases per day as the 2nd wave, but it still had way fewer deaths then in the 2nd wave.So lets hope
+for the best and Mask Up.
